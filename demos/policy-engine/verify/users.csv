@@ -1,0 +1,17 @@
+## Demo users for import-verify-users.sh, based on keycloak/realm-export.json.
+## Multi-valued roles, permissions, teams, and gh_permissions use | separators.
+## Empty cells mean no values. The ibmverify claim mapper handles scalar claims.
+##
+## username -> userName; email -> emails[0].value; first_name/last_name -> name.
+## roles/permissions/teams/gh_permissions -> custom attributes.
+## manager names one userName, resolved to a SCIM id after all users exist.
+## Bob names Alice as his approval manager; the other manager cells are empty.
+## Passwords are lab credentials and match post_deploy_variables.json.
+##
+## Alice: engineer with internal-repo access. Bob: HR with view_ssn.
+## Charlie: auditor with pii_access. Eve: HR without view_ssn.
+username,email,first_name,last_name,password,roles,permissions,teams,gh_permissions,manager
+alice,alice@corp.com,Alice,Engineer,aliceLab3151,engineer,tool_execute,engineering,repo:read:internal,
+bob,bob@corp.com,Bob,HRManager,bobLab3151,hr,tool_execute|view_ssn|pii_access|email_send,hr,,alice
+charlie,charlie@corp.com,Charlie,Auditor,charlieLab3151,auditor,tool_execute|pii_access,compliance,,
+eve,eve@corp.com,Eve,HRWithoutSSN,eveLab3151,hr,tool_execute,hr,,

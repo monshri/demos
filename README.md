@@ -1,4 +1,6 @@
 # Praxis demos
+[![FOSSA Status](https://app.fossa.com/api/projects/git%2Bgithub.com%2Fpraxis-proxy%2Fdemos.svg?type=shield)](https://app.fossa.com/projects/git%2Bgithub.com%2Fpraxis-proxy%2Fdemos?ref=badge_shield)
+
 
 Runnable, self-contained demos and setups for [Praxis](https://github.com/praxis-proxy/praxis).
 Each demo lives under `demos/<name>/` with its own README.
@@ -11,7 +13,9 @@ See also [experimental builds](https://github.com/praxis-proxy/experimental).
 |------|-------------|
 | [anthropic-messages](demos/anthropic-messages/) | Route Anthropic `/v1/messages` requests to any backend — Anthropic API, vLLM, or OpenAI-compatible — with optional format transformation via composable filters. |
 | [authpolicy-transpiler](demos/authpolicy-transpiler/) | Offline CLI that transpiles a Kuadrant `AuthPolicy` into Praxis policy config (a `policy`-filter block plus a Praxis Policy Engine policy document), with a coverage report showing what maps to CEL and what is out of scope. |
-| [policy-engine](demos/policy-engine/) | Policy enforcement on MCP traffic: authorization flows connecting identity to access control decisions with Cedar or CEL PDP, delegation, out-of-band elicitation, data redaction, and session tainting. |
+| [policy-engine](demos/policy-engine/) | Identity-aware policy enforcement on MCP tool calls with Cedar, CEL, or OPA/Rego: user and workload authentication, scoped token delegation, trusted identity headers, human approval, data redaction, PII blocking, and session taint controls. An optional SPIRE layer demonstrates node and workload attestation. |
+| [policy-engine-audit](demos/policy-engine-audit/) | Audit trail for the policy engine: every allow, deny or redact leaves the gateway as a signed, hash-chained OCSF record through the `ocsf-audit` sink, and an independent append-only ledger receipts each one. Live HR-copilot chat with a prompt-injection beat, plus tamper and restart proofs. |
+| [ppe-vault-delegation](demos/ppe-vault-delegation/) | Per-user GitHub credential delegation through Praxis AI and PPE using a self-hosted Vault Community dev server. |
 | [openai-responses-stateless](demos/openai-responses-stateless/) | Stateless passthrough for OpenAI `/v1/responses` with `store: false`. Praxis classifies the request, detects stateless mode, and proxies directly to vLLM — no buffering, no persistence, no transformation. |
 | [openai-responses-codex-passthrough](demos/openai-responses-codex-passthrough/) | Live Codex CLI passthrough to the OpenAI Responses API. Demonstrates model alias rewriting, default injection, effective-model headers, SSE, and a Codex-owned tool loop. Run the [all-in-one narrated demo](demos/openai-responses-codex-passthrough/README.md#all-in-one-recommended) or each [step individually](demos/openai-responses-codex-passthrough/README.md#step-by-step-multi-terminal). |
 | [openai-responses-multi-turn](demos/openai-responses-multi-turn/) | Multi-turn conversation (non-streaming) for the OpenAI Responses API. Praxis stores turn 1 in SQLite, then rehydrates the conversation history on turn 2 via `previous_response_id` and rebuilds the request body before forwarding to vLLM. |
@@ -24,6 +28,7 @@ See also [experimental builds](https://github.com/praxis-proxy/experimental).
 | [openai-responses-file-search](demos/openai-responses-file-search/) | Server-side file search — model calls file_search, Praxis dispatches to OGX's vector store search API, loops back with ranked results, and the model answers grounded in retrieved documents. |
 | [openai-responses-streaming-agentic-loop](demos/openai-responses-streaming-agentic-loop/) | Streaming agentic loop — one logical SSE stream preserved across multiple IRR rounds. Model calls a tool mid-stream (web search or MCP), Praxis withholds the terminal event, dispatches, and streams the final answer — `response.created` and `response.completed` each appear exactly once. |
 | [skillberry-agent-proxy](demos/skillberry-agent-proxy/) | A fully automated demo of Praxis as an agentic gateway for the Skillberry Agent platform, based on [skillberry-agent-praxis-poc](https://github.com/skillberry-ai/skillberry-agent-praxis-poc) |
+| [ratelimit-agents-requests](demos/ratelimit-agents-requests/) | Per-agent request rate limiting with the experimental PPE `ratelimit/limitador` plugin (embedded Limitador): an agent's calls to a shared model are counted per verified `subject.id`, and over-budget calls get a real `429` at the gateway before the model runs, with per-route budgets and unmetered routes. Deterministic verification plus a recorded three-pane walkthrough. |
 
 ## Grid QuickStarts
 
@@ -38,6 +43,7 @@ runtime assertions. Each demo requires a local
 | [grid-workload-inference](demos/grid-workload-inference/) | Cluster-local workload entry without public ingress |
 | [grid-llmd-pool-metrics](demos/grid-llmd-pool-metrics/) | EPP telemetry, Grid scoring, A-to-B-to-A capacity failover |
 | [grid-combined-site](demos/grid-combined-site/) | Consumer and secured provider roles colocated at each site |
+| [grid-llmd-litellm](demos/grid-llmd-litellm/) | Enrolled two-site grid over llm-d, routed by grid_site_route, behind a litellm front door that owns caller auth |
 
 ## Grid Labs and Guides
 
@@ -75,4 +81,7 @@ the relevant documentation.
 
 ## License
 
-Apache 2.0
+Apache-2.0
+
+
+[![FOSSA Status](https://app.fossa.com/api/projects/git%2Bgithub.com%2Fpraxis-proxy%2Fdemos.svg?type=large)](https://app.fossa.com/projects/git%2Bgithub.com%2Fpraxis-proxy%2Fdemos?ref=badge_large)

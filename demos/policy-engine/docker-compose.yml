@@ -13,7 +13,7 @@ services:
     # 26.2+ ships Standard Token Exchange v2 — simpler than v1's
     # fine-grained authz-services permissions. See the README's
     # "Architectural patterns" section for the difference.
-    # Built from ./keycloak/Dockerfile — stock Keycloak 26.2 plus the CIBA
+    # Built from ./keycloak/Dockerfile — stock Keycloak 26.8 plus the CIBA
     # HTTP authentication-channel SPI compiled from keycloak/ciba-spi/.
     build:
       context: ./keycloak
@@ -48,7 +48,7 @@ services:
       # clicks Approve there and the UI calls Keycloak back. Provider id
       # `http-authentication-channel`; the URI is the compose service.
       KC_SPI_CIBA_AUTH_CHANNEL_PROVIDER: http-authentication-channel
-      KC_SPI_CIBA_AUTH_CHANNEL_HTTP_AUTHENTICATION_CHANNEL_HTTP_AUTHENTICATION_CHANNEL_URI: "http://auth-channel:5001/ciba/auth"
+      CIBA_AUTH_CHANNEL_URL: "http://auth-channel:5001/ciba/auth"
     volumes:
       - ./keycloak/realm-export.json:/opt/keycloak/data/import/realm-export.json:ro
     ports:
@@ -99,7 +99,7 @@ services:
       - "5001:5001"
 
   valkey:
-    image: valkey/valkey:8
+    image: docker.io/valkey/valkey:8
     container_name: policy-demo-valkey
     ports:
       - "6379:6379"

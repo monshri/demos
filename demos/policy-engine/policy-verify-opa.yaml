@@ -1,0 +1,262 @@
+# GENERATED FILE. Source: policy-verify-opa.yaml.tmpl.
+# Edit the template; restart.sh regenerates this file.
+
+engine_settings:
+  dispatch: policy
+
+plugins:
+  # User identity. Carries the human's roles + permissions claims.
+  - name: jwt-user
+    capabilities:
+      # Required for outbound IdP requests.
+      - perform_http
+    kind: identity/jwt
+    hooks: [identity.resolve]
+    mode: sequential
+    on_error: fail
+    config:
+      role: user
+      header: X-User-Token
+      # Trust Verify tokens with the registered praxis-gateway audience.
+      trusted_issuers:
+        - issuer: "https://praxis-1.verify.ibm.com/oauth2"
+          audiences: ["praxis-gateway"]
+          algorithms: ["RS256"]
+          decoding_key:
+            kind: jwks_url
+            url: "https://praxis-1.verify.ibm.com/oauth2/jwks"
+          leeway_seconds: 60
+      claim_mapper: standard
+
+  # Client identity. Carries the agent's client_id / azp.
+  - name: jwt-client
+    capabilities:
+      # Required for outbound IdP requests.
+      - perform_http
+    kind: identity/jwt
+    hooks: [identity.resolve]
+    mode: sequential
+    on_error: fail
+    config:
+      role: client
+      header: Authorization
+      # Verify only — same reasoning as jwt-user above.
+      trusted_issuers:
+        - issuer: "https://praxis-1.verify.ibm.com/oauth2"
+          audiences: ["praxis-gateway", "account"]
+          algorithms: ["RS256"]
+          decoding_key:
+            kind: jwks_url
+            url: "https://praxis-1.verify.ibm.com/oauth2/jwks"
+          leeway_seconds: 60
+      claim_mapper: standard
+
+  # Exchange the user token for Workday access; retain the user permissions.
+  - name: workday-oauth
+    kind: delegator/oauth
+    hooks: [token.delegate]
+    mode: sequential
+    on_error: fail
+    capabilities:
+      # Required for outbound IdP requests.
+      - perform_http
+      - read_inbound_credentials
+      - write_delegated_tokens
+    config:
+      token_endpoint: "https://praxis-1.verify.ibm.com/oauth2/token"
+      # Use the exchange client; Verify rejects exchanging tokens issued by the
+      # same client (CSIAQ5207E).
+      client_id: "c619871a-6a66-45cd-b1eb-dddde1c318c2"
+      # restart.sh loads this secret from .env.verify.
+      client_secret_source:
+        kind: env_var
+        name: VERIFY_GATEWAY_CLIENT_SECRET
+      timeout_seconds: 5
+      default_outbound_header: "Authorization"
+
+  # Scan tool arguments for PII before invocation.
+  - name: pii-scan
+    kind: validator/pii-scan
+    hooks: [cmf.tool_pre_invoke]
+    mode: sequential
+    on_error: fail
+    config:
+      detect:
+        - { kind: ssn }
+        - { kind: credit_card }
+      mode: deny
+
+  # Emit JSON audit records for tool calls.
+  - name: audit-log
+    kind: audit/logger
+    hooks:
+      - cmf.tool_pre_invoke
+    mode: sequential
+    # Run last to record the decision and delegated tokens.
+    on_error: ignore  # observation failures don't halt traffic
+    capabilities:
+      - read_subject
+      - read_client
+      - read_meta
+      - read_delegated_tokens
+    config:
+      destination: stderr
+      source: policy-demo-gateway
+
+  # Verify echoes the requested scope. The permissions assertion below checks
+  # the exchanged token; it does not prove an IdP entitlement decision.
+  - name: github-oauth
+    kind: delegator/oauth
+    hooks: [token.delegate]
+    mode: sequential
+    on_error: fail
+    capabilities:
+      # Required for outbound IdP requests.
+      - perform_http
+      - read_inbound_credentials
+      - write_delegated_tokens
+    config:
+      token_endpoint: "https://praxis-1.verify.ibm.com/oauth2/token"
+      # Use the exchange client; Verify rejects exchanging tokens issued by the
+      # same client (CSIAQ5207E).
+      client_id: "c619871a-6a66-45cd-b1eb-dddde1c318c2"
+      client_secret_source:
+        kind: env_var
+        name: VERIFY_GATEWAY_CLIENT_SECRET
+      timeout_seconds: 5
+      default_outbound_header: "Authorization"
+
+  # Request manager approval through Keycloak CIBA. Pending calls return -32120.
+  - name: manager-approver
+    capabilities:
+      # Required for outbound IdP requests.
+      - perform_http
+    kind: elicitation/ciba
+    hooks: [elicit]
+    mode: sequential
+    on_error: fail
+    config:
+      # CIBA still uses Keycloak. Keep both endpoints on the same IdP, and run
+      # scenario 11 with a Keycloak configuration.
+      backchannel_endpoint: "http://localhost:8081/realms/policy-demo/protocol/openid-connect/ext/ciba/auth"
+      token_endpoint: "http://localhost:8081/realms/policy-demo/protocol/openid-connect/token"
+      insecure_http: true   # localhost dev — never production
+      client_id: "praxis-gateway"
+      client_secret_source:
+        kind: literal
+        secret: "praxis-gateway-secret"
+      scope: openid
+      approver_claim: preferred_username
+      default_requested_expiry_seconds: 120
+
+global:
+  authentication:
+    - jwt-user
+    - jwt-client
+
+  # Assert engine-derived identity in upstream headers (scenario 12).
+  # These headers are unsigned; the backend must trust its connection to the gateway.
+  assertions:
+    request:
+      headers:
+        # Require the resolved subject id.
+        - name: x-auth-user-id
+          from: subject.id
+          on_missing: deny
+
+        # The human-readable name, for the demo log. A claim, not a slot.
+        - name: x-auth-username
+          from: claim.preferred_username
+
+        # Encode the sorted collection explicitly for stable header values.
+        - name: x-auth-roles
+          from: subject.roles
+          encode: csv
+
+        # `members:` renders one JSON object with operator-chosen keys, for
+        # everything that would otherwise be a header each.
+        - name: x-auth-context
+          members:
+            manager: claim.manager
+            teams: subject.teams
+
+      # Strip the original user token. Delegation replaces Authorization with
+      # the exchanged token. Protocol headers such as Host cannot be stripped.
+      strip:
+        - x-user-token
+
+  # Compile Rego modules at load time and evaluate opa: steps in-process.
+  # Attribute names map to input keys, e.g. role.engineer -> input.role.engineer.
+  pdp:
+    - kind: opa
+      on_error: deny   # fail-closed; the default, spelled out
+      modules:
+        - |
+          package authz
+
+          # Absent an allow rule that fires, the answer is deny. Rego's
+          # `default` is what makes this fail-closed rather than undefined.
+          default allow := false
+
+          # Engineers may read internal repos. A missing key makes the
+          # body undefined rather than an error, so a request with no
+          # engineer role simply does not match.
+          allow if {
+            input.role.engineer == true
+            input.args.visibility == "internal"
+          }
+
+          # Security may read any repo, whatever its visibility.
+          allow if {
+            input.role.security == true
+          }
+
+  # Persist session taint in Valkey across gateway restarts (scenarios 08/09).
+  # Labels are keyed by subject and session id.
+  session_store:
+    kind: valkey
+    endpoint: localhost:6379
+
+routes:
+
+  - tool: get_compensation
+    authorization:
+      pre_invocation:
+        - "require(role.hr)"
+        - "delegate(workday-oauth, target: workday-api, audience: workday-api, permissions: [read_compensation])"
+        - "taint(secret, session)"
+        - "run(audit-log)"
+    args:
+      ssn: "str | redact(!perm.view_ssn)"
+    result:
+      ssn: "str | redact(!perm.view_ssn)"
+
+  - tool: search_repos
+    authorization:
+      pre_invocation:
+        - "require(team.engineering | team.security)"
+        - opa:
+            query: data.authz.allow
+            on_deny:
+              - "deny('engineering may read internal repos only; security may read any', 'opa.policy_denied')"
+        - "delegate(github-oauth, target: github-api, audience: github-api, permissions: [repo:read:internal])"
+        - "!(delegation.granted.permissions contains 'repo:read:internal'): deny"
+        - "run(audit-log)"
+
+  - tool: send_email
+    authorization:
+      pre_invocation:
+        - "require(perm.email_send)"
+        - "run(audit-log)"
+        - "run(pii-scan)"
+        - "security.labels contains \"secret\": deny('external email blocked: this session accessed secret data', 'session_tainted_secret')"
+
+  # Adjustments over $10K require manager approval, scoped to the requested amount.
+  - tool: adjust_compensation
+    authorization:
+      pre_invocation:
+        - "require(role.hr)"
+        - when: "args.amount > 10000"
+          do:
+            - "require_approval(manager-approver, from: claim.manager, channel: \"ciba\", scope: \"args.amount <= 25000\", purpose: \"Approve a compensation adjustment\", timeout: 24h)"
+        - "run(audit-log)"

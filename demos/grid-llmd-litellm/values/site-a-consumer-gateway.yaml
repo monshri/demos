@@ -1,0 +1,55 @@
+# Consumer gateway for site-a: the AI-GW Grid box. The chart renders grid_site_route
+# over the operator-published serving config, and the signals pollers read their
+# identity from the enrolled grid-site-identity. No backends are listed: every
+# upstream comes from the operator's dial file, the local provider direct and
+# each peer through its provider gateway at the address its GridSite declares.
+#
+# No auth filter: litellm is the authenticating front, and Grid only routes.
+
+fullnameOverride: consumer-gateway
+
+image:
+  repository: ghcr.io/praxis-proxy/grid-gateway
+  tag: v0.3.0-rc.3
+  flavor: grid-gateway
+  pullPolicy: IfNotPresent
+
+grid:
+  networkName: grid-llmd
+  siteName: site-a
+
+praxisConfig:
+  source: render
+  render:
+    role: consumer
+    auth:
+      mode: none
+      allowUnauthenticatedExposure: true
+    gridServing:
+      enabled: true
+      networkName: grid-llmd
+      gatewayRefName: consumer-gateway
+      siteRoute:
+        availability: {}
+        # Keep a conversation on the site holding its prompt. capacity is
+        # per backend cluster, per gateway replica.
+        prefixAffinity:
+          enabled: true
+          threshold: 0.8
+          exploration: 0.02
+          capacity: 16384
+          ttl_secs: 600
+
+gridIdentity:
+  tlsSecretName: grid-site-identity
+  caSecretName: grid-ca
+
+service:
+  enabled: true
+  type: LoadBalancer
+  port: 8080
+  annotations:
+    metallb.io/loadBalancerIPs: "10.90.0.203"
+
+podLabels:
+  grid.praxis.fast/consumer-site: site-a

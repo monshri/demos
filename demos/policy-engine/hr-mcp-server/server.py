@@ -14,8 +14,13 @@ Run locally:
     pip install -r requirements.txt
     uvicorn server:app --host 0.0.0.0 --port 9100
 
-Endpoint:
-    POST /mcp   — JSON-RPC 2.0 requests
+Endpoints:
+    POST /mcp        JSON-RPC 2.0 requests
+    GET  /_requests  what reached this server since the last reset
+    POST /_reset     drop the recorded requests
+
+`/_requests` exists so the scenarios can assert what the gateway did, rather
+than printing a claim next to a log line and trusting a human to read it.
 
 Methods:
     tools/list, tools/call      — tool discovery and invocation
@@ -23,7 +28,8 @@ Methods:
     resources/list, resources/read — resource discovery and content fetch
 
 Tools:
-    get_compensation, send_email, display_compensation, get_directory
+    get_compensation, send_email, display_compensation, get_directory,
+    search_repos, search_repos_agent, adjust_compensation, get_headcount
 
 Prompts:
     summarize-report, onboarding-checklist
@@ -32,9 +38,13 @@ Resources:
     hr://employees/compensation, hr://employees/directory
 """
 
+import base64
+import hashlib
 import json
 import logging
 import sys
+import time
+from collections import deque
 from typing import Any
 
 from fastapi import FastAPI, Request
@@ -48,6 +58,89 @@ logging.basicConfig(
 logger = logging.getLogger("hr-mcp-server")
 
 app = FastAPI(title="HR Demo MCP Server")
+
+# ---------------------------------------------------------------------------
+# Inbound request recorder
+#
+# The scenarios assert things about what reached this server: that a denied
+# call never arrived at all, that `authorization` is the IdP-minted token for
+# the right audience rather than the caller's own JWT, that `args.ssn` was
+# rewritten on the way in, and that the gateway's asserted headers are the
+# engine's values rather than anything the client sent.
+#
+# Reading that back out of the container log is racy and awkward, so every
+# inbound request is also kept here and served from `/_requests`. Scenarios
+# POST `/_reset` first, make the call, then assert against what landed.
+#
+# Bounded, in memory, and wiped on restart: this is demo introspection, not an
+# audit log. The audit trail is the audit-logger plugin.
+# ---------------------------------------------------------------------------
+
+_RECORDED: deque[dict[str, Any]] = deque(maxlen=50)
+
+
+def _jwt_claims(token: str) -> dict[str, Any]:
+    """Decode a JWT payload WITHOUT verifying it.
+
+    The gateway already verified anything it forwards. This only needs enough
+    of the claim set for a scenario to assert which token arrived, so an
+    unverified decode is the right tool. Never do this to make a decision.
+    """
+    raw = token[7:] if token.startswith("Bearer ") else token
+    parts = raw.split(".")
+    if len(parts) != 3:
+        return {}
+    try:
+        pad = parts[1] + "=" * (-len(parts[1]) % 4)
+        claims = json.loads(base64.urlsafe_b64decode(pad))
+    except Exception:
+        return {}
+    aud = claims.get("aud")
+    return {
+        "aud": [aud] if isinstance(aud, str) else (aud or []),
+        "azp": claims.get("azp"),
+        "sub": claims.get("sub"),
+        "scope": claims.get("scope"),
+        "digest": hashlib.sha256(raw.encode()).hexdigest()[:12],
+    }
+
+
+def _looks_like_jwt(value: str) -> bool:
+    body = value[7:] if value.startswith("Bearer ") else value
+    return body.startswith("eyJ") and body.count(".") == 2
+
+
+def _record(request: "Request", rpc: dict[str, Any]) -> None:
+    """Record an inbound request for `/_requests`.
+
+    Deliberately swallows everything. This is demo introspection sitting in the
+    request path of a demo people run live, so a bug here must never turn a
+    valid tool call into an error response.
+    """
+    try:
+        params = rpc.get("params") or {}
+        _RECORDED.append(
+            {
+                "ts": time.time(),
+                "method": rpc.get("method"),
+                "tool": params.get("name"),
+                "arguments": params.get("arguments", {}),
+                "headers": {k.lower(): _record_value(v) for k, v in request.headers.items()},
+            }
+        )
+    except Exception:
+        logger.exception("failed to record the inbound request (ignored)")
+
+
+def _record_value(value: str) -> Any:
+    """Summarise a token-valued header instead of echoing it.
+
+    A scenario asserts *which* token arrived, never its bytes, so the claim
+    set is both safer to serve and a more direct expression of the claim.
+    """
+    if _looks_like_jwt(value):
+        return {"jwt": _jwt_claims(value)}
+    return value
 
 # ---------------------------------------------------------------------------
 # Mock data (copied from sibling-repos/apl-plugins/demo/hr_demo_server.py)
@@ -174,6 +267,15 @@ def tool_get_directory(args: dict[str, Any]) -> list[dict[str, Any]]:
     return entries
 
 
+def tool_get_headcount(args: dict[str, Any]) -> dict[str, Any]:
+    # Aggregate only, no names: the kind of report an agent produces on its
+    # own, with no user behind the call. The workload scenarios use it.
+    counts: dict[str, int] = {}
+    for emp in EMPLOYEES.values():
+        counts[emp["department"]] = counts.get(emp["department"], 0) + 1
+    return {"headcount": counts, "total": sum(counts.values())}
+
+
 def tool_search_repos(args: dict[str, Any]) -> dict[str, Any]:
     # Simulated GitHub Enterprise search. The interesting demo
     # property: this returns the repo IF the gateway allowed the
@@ -217,7 +319,15 @@ TOOLS = {
     "send_email": tool_send_email,
     "display_compensation": tool_display_compensation,
     "get_directory": tool_get_directory,
+    "get_headcount": tool_get_headcount,
     "search_repos": tool_search_repos,
+    # Scenario 14's agent route. Same handler as search_repos: the upstream
+    # behavior is identical, and the separate name exists so the gateway can
+    # give the AGENT principal its own route (own resolver, own status check,
+    # no team gate) without changing the human path through search_repos.
+    # Routes are keyed by tool name and a name may appear on only one route,
+    # which is why this is a second entry rather than a shared one.
+    "search_repos_agent": tool_search_repos,
     "adjust_compensation": tool_adjust_compensation,
 }
 
@@ -400,6 +510,8 @@ async def mcp_endpoint(request: Request) -> JSONResponse:
             status_code=400,
         )
 
+    _record(request, rpc)
+
     method = rpc.get("method", "")
     rpc_id = rpc.get("id")
 
@@ -545,6 +657,19 @@ async def mcp_endpoint(request: Request) -> JSONResponse:
         },
         status_code=404,
     )
+
+
+@app.get("/_requests")
+async def recorded_requests() -> dict[str, Any]:
+    """What actually reached this server since the last reset."""
+    return {"count": len(_RECORDED), "requests": list(_RECORDED)}
+
+
+@app.post("/_reset")
+async def reset_recorded() -> dict[str, Any]:
+    """Drop the recorded requests so a scenario starts from a clean slate."""
+    _RECORDED.clear()
+    return {"count": 0}
 
 
 @app.get("/healthz")

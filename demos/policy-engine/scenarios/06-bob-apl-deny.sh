@@ -1,41 +1,23 @@
 #!/usr/bin/env bash
-# Bob (HR, group=hr) tries to search github repos. APL's coarse
-# gate fails immediately — Bob isn't in engineering or security.
-# The deny happens BEFORE Cedar runs, before any IdP call.
 #
-# This shows the "fast path" in the policy: cheap predicates run
-# first, expensive PDP / IdP work only happens for requests that
-# clear them.
-#
-#   Layer 1 — APL gate `require(team.engineering | team.security)`
-#             → FAILS (Bob is in team.hr)
-#   Layers 2-4 — never reached. Cedar never invoked, IdP never
-#             called, no token-exchange round-trip.
-#
-# Result: HTTP 200 + JSON-RPC error code -32001, data.violation =
-# the apl.policy step index that failed.
+# Bob fails require(team.engineering | team.security).
+# Expect JSON-RPC -32001 before the PDP, token exchange, or upstream call.
 
 set -euo pipefail
 source "$(dirname "$0")/_lib.sh"
 
 step "Bob (HR) → search_repos (gateway short-circuits at the APL gate)"
-note "Expected: HTTP 200 + JSON-RPC error -32001, violation=routes.tool:search_repos.apl.pre_invocation[0]"
 note "Triggered by: require(team.engineering | team.security) — Bob is team.hr"
-note "Expected: Cedar never runs; IdP never called"
+note "The PDP never runs and the IdP is never called"
 
 BOB=$(mint bob)
 CLIENT=$(mint hr-copilot)
 
-curl -s -X POST "$GATEWAY/mcp" \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer $CLIENT" \
-  -H "X-User-Token: $BOB" \
-  -d '{
-    "jsonrpc": "2.0",
-    "id": 1,
-    "method": "tools/call",
-    "params": {
-      "name": "search_repos",
-      "arguments": { "visibility": "internal" }
-    }
-  }' -i 2>&1 | head -20
+reset_upstream
+call_search_repos "$BOB" "$CLIENT" internal
+
+expect_status 200
+expect_rpc_error -32001
+expect_violation "routes.tool:search_repos.pre_invocation[0]"
+expect_upstream_calls 0
+finish

@@ -1,0 +1,26 @@
+# Identity for the grid, issued on the hub cluster in its own namespace, because
+# that namespace holds the Grid CA key. External mode runs no enrollment service:
+# cert-manager generates the CA and issues one leaf per listed site, each carrying
+# spiffe://grid.internal/site/<name>, <name>.grid.internal and, under Local,
+# <name>-signals.grid.internal. Delivering the issued Secrets to the sites is
+# something outside the grid, here up.sh, in a fleet an ACM or OCM policy.
+
+mode: external
+
+grid:
+  membership:
+    source: Local
+
+external:
+  sites:
+    site-a:
+      secretName: grid-site-a
+    site-b:
+      secretName: grid-site-b
+  certManager:
+    enabled: true
+    issuer:
+      create: true
+    ca:
+      # Generate is for a new grid. An existing CA is mode Existing with its key in secretName.
+      mode: Generate

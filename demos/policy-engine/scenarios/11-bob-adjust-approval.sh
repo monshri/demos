@@ -2,21 +2,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Praxis Contributors
 #
-# Human-in-the-loop manager approval — the over-threshold half.
-# Bob asks for a >$10k adjustment; the gateway SUSPENDS the call with
-# JSON-RPC -32120 (NOT a deny) and requests Bob's manager (Alice) to
-# approve out-of-band over OIDC CIBA. The four beats:
+# Bob's >$10k adjustment needs Alice's decision over OIDC CIBA.
 #
 #   S1 adjust_compensation (+$25k) → -32120 pending; capture the
 #      elicitation_id + approver from error.data
-#   S2 the manager approves:
+#   S2 the manager decides:
 #        default        — you open http://localhost:5001 and click Approve
+#                          (or Deny)
 #        AUTO_APPROVE=1  — the script drives the auth-channel /pending +
 #                          /approve endpoints (no human click)
-#   S3 peek (X-Policy-Elicitation-Id + peek) until the gateway answers
-#      -32121 (approved) — reports status, does NOT apply. Polls slower
-#      than Keycloak's CIBA interval (~5s) to avoid a slow_down.
-#   S4 re-send WITHOUT peek → 200 OK, status "applied" — the raise lands.
+#        AUTO_DENY=1     — same, but POSTs /deny: the manager refuses
+#   S3 peek until the gateway reports approval (-32121) or denial.
+#      Poll slower than Keycloak's CIBA interval (~5s) to avoid slow_down.
+#   S4 re-send without peek. Only an approved adjustment reaches the upstream.
 #
 # The approval is bound to the amount (scope: args.amount <= 25000), so a
 # sign-off can't be replayed against a larger change.
@@ -43,18 +41,24 @@ CLIENT=$(mint hr-copilot)
 # a manual run left pending. Record them now so S2 can tell this run's request
 # apart from those.
 PRE_ARIDS=""
-if [ -n "${AUTO_APPROVE:-}" ]; then
+if [ -n "${AUTO_APPROVE:-}${AUTO_DENY:-}" ]; then
   PRE_ARIDS=$(curl -fsS "$AUTH_CHANNEL/pending" 2>/dev/null \
                 | jq -r '.[].auth_req_id' 2>/dev/null) || true
 fi
 
 # --- S1 · the sensitive ask -----------------------------------------------
 step "S1 · Bob (HR) → adjust_compensation (+\$$AMOUNT, over the \$10k threshold)"
-note "Expected: HTTP 200 + JSON-RPC error -32120 (pending) — NOT a deny"
 note "The gateway requested $APPROVER's out-of-band approval and suspended the call"
 
+reset_upstream
 RAW=$(_post_tool "$BOB" "$CLIENT" "$(adjust_compensation_body "$AMOUNT" "$EMPLOYEE")")
 _print_response "$RAW"
+
+expect_status 200
+# Suspended, not denied. The distinction is the whole point of the flow.
+expect_rpc_error -32120
+expect_violation elicitation.pending
+expect_upstream_calls 0
 BODY=$(_http_body "$RAW")
 
 CODE=$(printf '%s' "$BODY" | jq -r '.error.code // empty' 2>/dev/null || true)
@@ -70,13 +74,26 @@ note "elicitation_id: $EID"
 note "approver: $APPROVER"
 [ -n "$EID" ] || { note "No elicitation_id in the response — cannot resume."; exit 1; }
 
-# --- S2 · the manager approves --------------------------------------------
-if [ -n "${AUTO_APPROVE:-}" ]; then
-  step "S2 · Auto-approving as $APPROVER (AUTO_APPROVE=1)"
+# --- S2 · the manager decides ---------------------------------------------
+# AUTO_DENY wins if both flags are set.
+if [ -n "${AUTO_DENY:-}" ]; then
+  DECISION=deny
+elif [ -n "${AUTO_APPROVE:-}" ]; then
+  DECISION=approve
+else
+  DECISION=manual
+fi
+
+if [ "$DECISION" != manual ]; then
+  if [ "$DECISION" = deny ]; then
+    step "S2 · Auto-denying as $APPROVER (AUTO_DENY=1)"
+  else
+    step "S2 · Auto-approving as $APPROVER (AUTO_APPROVE=1)"
+  fi
   note "Driving the auth-channel approval UI programmatically — no human click"
   # The auth-channel keys pending requests by Keycloak's authReqId (not the
   # gateway's elicitation_id), so look it up via the dev-only /pending API.
-  # Take the newest id absent from PRE_ARIDS: approving a leftover would report
+  # Take the newest id absent from PRE_ARIDS: deciding a leftover would report
   # success while the gateway kept waiting on its own request.
   ARID=""
   for _ in $(seq 1 "$MAX_POLLS"); do
@@ -91,35 +108,79 @@ if [ -n "${AUTO_APPROVE:-}" ]; then
     sleep 1
   done
   [ -n "$ARID" ] || { note "No new pending request for $APPROVER at $AUTH_CHANNEL."; exit 1; }
-  note "auth_req_id: $ARID → POST /approve"
-  curl -fsS -X POST "$AUTH_CHANNEL/approve/$ARID" >/dev/null
-  note "Approved. Keycloak releases the token on the gateway's next CIBA poll."
+  note "auth_req_id: $ARID → POST /$DECISION"
+  curl -fsS -X POST "$AUTH_CHANNEL/$DECISION/$ARID" >/dev/null
+  if [ "$DECISION" = deny ]; then
+    note "Denied. Keycloak fails the gateway's next CIBA poll (access_denied)."
+  else
+    note "Approved. Keycloak releases the token on the gateway's next CIBA poll."
+  fi
 else
-  step "S2 · Waiting for $APPROVER to approve"
-  note "Open $AUTH_CHANNEL and click Approve on the '$APPROVER' request."
-  note "(Or re-run with AUTO_APPROVE=1 to drive the approval automatically.)"
+  step "S2 · Waiting for $APPROVER to decide"
+  note "Open $AUTH_CHANNEL and click Approve (or Deny) on the '$APPROVER' request."
+  note "(Or re-run with AUTO_APPROVE=1 / AUTO_DENY=1 to decide automatically.)"
 fi
 
-# --- S3 · peek until approved ---------------------------------------------
-step "S3 · Peeking until the gateway reports approved (-32121)"
+# --- S3 · peek until the approval resolves --------------------------------
+step "S3 · Peeking until the gateway reports the approver's decision"
 note "Re-sends with X-Policy-Elicitation-Id + peek — reports status, does NOT apply"
-APPROVED=""
+OUTCOME=""
 for i in $(seq 1 "$MAX_POLLS"); do
   RAW=$(ELICITATION_ID="$EID" ELICITATION_PEEK=1 \
         _post_tool "$BOB" "$CLIENT" "$(adjust_compensation_body "$AMOUNT" "$EMPLOYEE")")
-  CODE=$(_http_body "$RAW" | jq -r '.error.code // "200"' 2>/dev/null || echo "?")
+  BODY=$(_http_body "$RAW")
+  CODE=$(printf '%s' "$BODY" | jq -r '.error.code // empty' 2>/dev/null || true)
   case "$CODE" in
-    -32121) APPROVED=1; note "poll $i: -32121 approved ✓"; break ;;
+    -32121) OUTCOME=approved; note "poll $i: -32121 approved ✓"; break ;;
     -32120) note "poll $i: -32120 still pending…" ;;
-    *)      note "poll $i: resolved with code $CODE"; _print_response "$RAW"; break ;;
+    *)
+      _print_response "$RAW"
+      if [ "$LAST_STATUS" = 200 ] &&
+         printf '%s' "$BODY" | jq -e '.error.message == "elicitation denied by approver"' >/dev/null; then
+        OUTCOME=denied
+        note "poll $i: approver denied"
+        break
+      fi
+      note "Unexpected response while waiting for Alice's decision."
+      exit 1 ;;
   esac
   sleep "$POLL_SECONDS"
 done
-[ -n "$APPROVED" ] || { note "Approval not observed within ~$((MAX_POLLS * POLL_SECONDS))s."; exit 1; }
+[ -n "$OUTCOME" ] || { note "No decision observed within ~$((MAX_POLLS * POLL_SECONDS))s."; exit 1; }
 
-# --- S4 · apply ------------------------------------------------------------
-step "S4 · Bob re-sends WITHOUT peek to apply the approved change"
-note "Expected: HTTP 200 + status \"applied\" — the raise lands"
+if [ "$DECISION" = approve ] && [ "$OUTCOME" != approved ]; then
+  note "AUTO_APPROVE=1 but the gateway did not report approved."; exit 1
+fi
+if [ "$DECISION" = deny ] && [ "$OUTCOME" != denied ]; then
+  note "AUTO_DENY=1 but the gateway reported $OUTCOME."; exit 1
+fi
+
+# --- S4 · apply (or don't) -------------------------------------------------
+if [ "$OUTCOME" = approved ]; then
+  step "S4 · Bob re-sends WITHOUT peek to apply the approved change"
+  note "The raise lands"
+else
+  step "S4 · Bob re-sends WITHOUT peek after the denial"
+  note "No approval to spend: the raise does not land"
+fi
+reset_upstream
 RAW=$(ELICITATION_ID="$EID" _post_tool "$BOB" "$CLIENT" "$(adjust_compensation_body "$AMOUNT" "$EMPLOYEE")")
 _print_response "$RAW"
-show_last_audit adjust_compensation
+
+expect_status 200
+if [ "$OUTCOME" = approved ]; then
+  expect_rpc_ok
+  expect_result_field status applied
+  # Only now does the tool actually run: the suspended call reached no upstream.
+  expect_upstream_calls 1
+else
+  expect_rpc_error -32120
+  expect_violation elicitation.pending
+  expect_upstream_calls 0
+fi
+
+if [ "$OUTCOME" = approved ]; then
+  show_last_audit adjust_compensation
+  expect_audit_record adjust_compensation
+fi
+finish

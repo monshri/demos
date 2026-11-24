@@ -1,0 +1,21 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 Praxis Contributors
+
+# Checks IBM Verify Agent Registry status before a tool call.
+# Registered by gateway/src/main.rs.
+[package]
+name = "praxis-policy-plugin-agent-status"
+publish = false
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "PPE identity plugin — denies calls from an agent whose IBM Verify Agent Registry status is not ACTIVE."
+
+[dependencies]
+praxis-policy-core = { path = "../../.policy/crates/ppe-core" }
+
+async-trait = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# `Bytes` is HttpRequest's body type.
+bytes = "1"

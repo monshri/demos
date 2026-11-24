@@ -1,8 +1,23 @@
-# gateway stdout/stderr captured by restart.sh
+# Gateway logs live outside the watched config directory.
 gateway.log
+# Gateway logs live outside the watched config directory.
+.gwlog/
 
 # Python virtualenv + caches for the agent/ chat client
 agent/.venv/
 __pycache__/
 *.pyc
 .env
+# post deployment variables installed by provisioner
+post_deploy_variables.json
+# IBM Verify tenant client secret for the Verify IdP path
+.env.verify
+
+# Tenant-specific policy output. Edit the matching .yaml.tmpl instead.
+# policy-verify-opa.yaml remains tracked from before the renderer was added.
+policy-verify-opa.yaml
+policy-verify-cel.yaml
+policy-verify-cedar.yaml
+
+# SPIRE server bundle exported by restart.sh for the agent to bootstrap from
+spire/agent/bootstrap.crt

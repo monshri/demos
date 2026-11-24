@@ -1,0 +1,19 @@
+## OAuth clients for import-verify-clients.sh, based on keycloak/realm-export.json.
+## Run import-verify-users.sh first.
+##
+## name: application display name. role: mint, exchange, audience, or agent.
+## ropc/client_creds/token_exchange: grant flags.
+## audiences/claims: pipe-separated resource names and token claim names.
+## pdv_id_key/pdv_secret_key: output keys in post_deploy_variables.json.
+##
+## The mint and exchange clients need separate ids and application entitlement.
+## The agent uses a JWT client-credentials token with no user roles or teams.
+## Its exchange client needs birthright entitlement because the agent has no SCIM
+## user id. The importer also creates an Agent Registry record and writes its id
+## as VERIFY_AGENT_ID. Registry status is enforced by the gateway.
+name,role,ropc,client_creds,token_exchange,audiences,claims,pdv_id_key,pdv_secret_key
+hr-copilot,mint,true,true,false,praxis-gateway|workday-api|github-api,roles|permissions|teams|gh_permissions|manager,HR_COPILOT_CLIENT_ID,HR_COPILOT_CLIENT_SECRET
+praxis-gateway,exchange,false,true,true,workday-api|github-api,roles|permissions|teams|gh_permissions|manager,GATEWAY_CLIENT_ID,GATEWAY_CLIENT_SECRET
+workday-api,audience,false,true,false,,,,
+github-api,audience,false,true,false,,,,
+hr-copilot-agent,agent,false,true,false,praxis-gateway|github-api,,AGENT_CLIENT_ID,AGENT_CLIENT_SECRET

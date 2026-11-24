@@ -4,7 +4,7 @@
 # in the repo.
 
 # Stage 1 — build the SPI jar.
-FROM maven:3.9-eclipse-temurin-17 AS spi-build
+FROM docker.io/maven:3.9-eclipse-temurin-17 AS spi-build
 WORKDIR /build
 COPY ciba-spi/pom.xml .
 COPY ciba-spi/src ./src
@@ -13,6 +13,6 @@ RUN mvn -q -e -B clean package
 # Stage 2 — Keycloak with the SPI dropped into providers/. `start-dev`
 # (see docker-compose) rebuilds on start and picks it up under the id
 # `http-authentication-channel`.
-FROM quay.io/keycloak/keycloak:26.2
+FROM quay.io/keycloak/keycloak:26.8.0
 COPY --from=spi-build /build/target/keycloak-ciba-http-channel.jar \
      /opt/keycloak/providers/keycloak-ciba-http-channel.jar

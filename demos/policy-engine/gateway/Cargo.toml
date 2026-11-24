@@ -12,23 +12,18 @@ name = "policy-engine-gateway"
 path = "src/main.rs"
 
 [dependencies]
-praxis-ai-proxy = { git = "https://github.com/praxis-proxy/ai", rev = "6054d7ef71dc0b02cd32fdd0b62e415fceddfd2c", features = ["praxis-main"] }
-# Declared only to turn on `policy-engine` graph-wide.
-praxis-proxy-filter = { version = "0.5", features = ["policy-engine"] }
-# Likewise for `admin-api`. praxis-ai's server calls the admin-endpoint helpers
-# unconditionally, praxis gates them behind this feature, and praxis-ai declares
-# its praxis dependencies with no features at all. Without this the build fails
-# on `add_admin_endpoints_to_pingora_server` not being found.
-praxis-proxy-protocol = { version = "0.5", features = ["admin-api"] }
+praxis-ai-proxy = { git = "https://github.com/praxis-proxy/ai", rev = "c39f7198", features = ["praxis-main"] }
+# Enable the policy filter used by this gateway.
+praxis-proxy-filter = { version = "0.7.5", features = ["policy-engine"] }
+# praxis-ai's server calls the admin endpoint helpers.
+praxis-proxy-protocol = { version = "0.7.5", features = ["admin-api"] }
 
-# Unpublished reference plugins the demo registers itself, in main.rs. This is
-# the worked example of extending the engine with a plugin it does not bundle.
-#
-# They are workspace members in the engine checkout, so they resolve
-# praxis-policy-core by path. The `[patch]` below keeps that the only copy in
-# the graph; see the note there.
+# Unpublished reference plugins, registered in src/main.rs.
 praxis-policy-plugin-pii-scanner = { path = ".policy/reference/plugins/pii-scanner" }
 praxis-policy-plugin-audit-logger = { path = ".policy/reference/plugins/audit-logger" }
+
+# Local plugin for IBM Verify Agent Registry status checks.
+praxis-policy-plugin-agent-status = { path = "plugins/agent-status" }
 
 clap = { version = "4", features = ["derive"] }
 tracing = "0.1"
@@ -36,36 +31,10 @@ tracing = "0.1"
 [target.'cfg(unix)'.dependencies]
 tikv-jemallocator = "0.7"
 
-# No published praxis carries `policy-engine`, so build it from the local
-# checkout `build-gateway.sh` populates at `.praxis/` (gitignored).
-#
-# The paths carry `crates/` because praxis moved core, filter, protocol, tls and
-# server under it. A checkout older than that move does not resolve here.
+# Share the policy core and orchestration crates with the path-based plugins.
+# The .policy checkout must match the engine version required by Praxis; a
+# version mismatch leaves duplicate crates and incompatible PluginFactory traits.
+# See DEFAULT_PPE_REF in build-gateway.sh.
 [patch.crates-io]
-praxis-proxy-core = { path = ".praxis/crates/core" }
-praxis-proxy-filter = { path = ".praxis/crates/filter" }
-praxis-proxy-protocol = { path = ".praxis/crates/protocol" }
-praxis-proxy-tls = { path = ".praxis/crates/tls" }
-
-# The engine comes from crates.io at 0.2.0, except these two. The reference
-# plugins above are `publish = false` and read the engine by path, so without
-# the patch the graph holds two copies of each: one by path, one from the
-# registry. Two copies of `praxis-policy-core` means two `PluginFactory` traits,
-# at which point the host registration in main.rs stops typechecking.
-#
-# Only these two, because only these two are reachable from the reference
-# plugins. The other eleven resolve from the registry with no duplicate.
-#
-# So `.policy` should sit on the released tag. A checkout on some other branch
-# links its `praxis-policy-core` against the published rest of the engine.
 praxis-policy-core = { path = ".policy/crates/ppe-core" }
 praxis-policy-orchestration = { path = ".policy/crates/ppe-orchestration" }
-
-# praxis-ai pins praxis-proxy-* by git tag, which `[patch.crates-io]` cannot
-# redirect. Without this the AI server registers from the tagged filter, which
-# has no `policy-engine`, and the `policy` filter silently never loads.
-[patch."https://github.com/praxis-proxy/praxis.git"]
-praxis-proxy-core = { path = ".praxis/crates/core" }
-praxis-proxy-filter = { path = ".praxis/crates/filter" }
-praxis-proxy-protocol = { path = ".praxis/crates/protocol" }
-praxis-proxy-tls = { path = ".praxis/crates/tls" }

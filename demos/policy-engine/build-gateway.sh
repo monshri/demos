@@ -2,88 +2,21 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Praxis Contributors
 #
-# Build the demo gateway and echo the binary path on stdout.
+# Build the gateway and print its binary path.
 #
-# The gateway (./gateway) is a thin binary that composes praxis-ai's AI filters
-# (mcp classifier, ...) with the `policy` filter: it depends on praxis-ai's
-# server, enables `policy-engine`, and `[patch]`es praxis-proxy-* to a praxis
-# checkout (via `gateway/.praxis`), because no published praxis carries the
-# `policy-engine` feature. praxis-ai + the feature auto-register both filters,
-# so there is no manual wiring.
-#
-# Where the praxis checkout comes from (first match wins), resolved into the
-# gitignored `gateway/.praxis`:
-#   PRAXIS_DIR                          path to a local praxis checkout (symlinked)
-#   existing gateway/.praxis            reused as-is
-#   otherwise                           clone PRAXIS_GIT_URL @ PRAXIS_GIT_REF,
-#                                       defaulting to the pinned commit below
-#
-# The policy engine itself comes from crates.io. A checkout is still needed at
-# `gateway/.policy` for the two reference plugins, which are unpublished, and for
-# the two engine crates they reach by path (see gateway/Cargo.toml).
-#
-# Usually not a second thing to point at: a sibling `praxis-policy` next to
-# whatever .praxis resolved to is used when there is one. PPE_DIR overrides, and
-# a clone at the tag below is the fallback, which is what a fresh checkout gets.
-#
-# The default ref is a commit, not a branch. praxis main moves, and the demo
-# builds it from source, so tracking a branch means the demo can break without
-# anything here changing. PRAXIS_GIT_REF=main opts back into tracking.
-#
-# Other knobs:
-#   GATEWAY_PROFILE=release|debug       (default: release)
+# Resolve gateway/.policy from PPE_DIR, an existing checkout, a sibling
+# praxis-policy directory, or PPE_GIT_URL at PPE_GIT_REF (default below).
+# The policy checkout must match the engine version required by Praxis.
+# GATEWAY_PROFILE=debug selects a debug build; release is the default.
 set -euo pipefail
 
-# praxis main @ #1096, the PPE 0.2.0 port. Verified with this demo end to end.
-# Bump deliberately.
-DEFAULT_PRAXIS_REF="38ff3e7b58fe295e93d2f4c3ad20a4a29337fa2f"
-
-# The engine release the gateway resolves from crates.io. The checkout supplies
-# the reference plugins, so keep it on the tag matching that release: a branch
-# would link its `praxis-policy-core` against the published rest of the engine.
-DEFAULT_PPE_REF="v0.2.0"
+# Policy tag for the reference plugins. Keep compatible with gateway/Cargo.toml.
+DEFAULT_PPE_REF="v0.4.1"
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/gateway"
-PRAXIS_LINK="$DIR/.praxis"
 PPE_LINK="$DIR/.policy"
 
-# 1. Resolve the praxis source into ./gateway/.praxis.
-#
-# A symlink is never fetched into. `.praxis` pointing at somebody's working
-# checkout means `git checkout` here would move their branch out from under them.
-if [ -n "${PRAXIS_DIR:-}" ]; then
-  target="$(cd "$PRAXIS_DIR" && pwd)"
-  ln -sfn "$target" "$PRAXIS_LINK"
-  echo "gateway: .praxis -> $target (PRAXIS_DIR)" >&2
-elif [ -L "$PRAXIS_LINK" ]; then
-  echo "gateway: .praxis -> $(readlink "$PRAXIS_LINK") (existing symlink)" >&2
-elif [ -d "$PRAXIS_LINK/.git" ] && [ -z "${PRAXIS_GIT_URL:-}" ]; then
-  echo "gateway: .praxis (existing clone, reused as-is)" >&2
-else
-  url="${PRAXIS_GIT_URL:-https://github.com/praxis-proxy/praxis.git}"
-  ref="${PRAXIS_GIT_REF:-$DEFAULT_PRAXIS_REF}"
-  if [ -d "$PRAXIS_LINK/.git" ]; then
-    echo "gateway: updating .praxis -> $ref ($url)" >&2
-    git -C "$PRAXIS_LINK" fetch --quiet --tags --force origin "$ref" 2>/dev/null \
-      || git -C "$PRAXIS_LINK" fetch --quiet --tags --force origin
-    # Detach rather than -B: a commit ref is not a branch name.
-    git -C "$PRAXIS_LINK" checkout --quiet --detach "$ref" 2>/dev/null \
-      || git -C "$PRAXIS_LINK" checkout --quiet --detach FETCH_HEAD
-  else
-    echo "gateway: cloning .praxis <- $url @ $ref" >&2
-    rm -rf "$PRAXIS_LINK"
-    # --branch takes a branch or tag, never a commit, so clone then detach.
-    git clone --quiet "$url" "$PRAXIS_LINK"
-    git -C "$PRAXIS_LINK" checkout --quiet --detach "$ref"
-  fi
-  echo "gateway: .praxis at $(git -C "$PRAXIS_LINK" rev-parse --short HEAD)" >&2
-fi
-
-# 1b. Resolve the policy engine into ./gateway/.policy.
-#
-# A sibling of whatever .praxis resolved to is preferred, so a developer working
-# on both does not point at the engine twice. praxis itself reads the engine from
-# crates.io, so this is a convenience rather than a constraint.
+# Reuse symlinks without fetching or changing the source checkout.
 if [ -n "${PPE_DIR:-}" ]; then
   target="$(cd "$PPE_DIR" && pwd)"
   ln -sfn "$target" "$PPE_LINK"
@@ -92,11 +25,9 @@ elif [ -L "$PPE_LINK" ]; then
   echo "gateway: .policy -> $(readlink "$PPE_LINK") (existing symlink)" >&2
 elif [ -d "$PPE_LINK/.git" ] && [ -z "${PPE_GIT_URL:-}" ]; then
   echo "gateway: .policy (existing clone, reused as-is)" >&2
-elif sibling="$(cd "$PRAXIS_LINK/../praxis-policy" 2>/dev/null && pwd)"; then
-  # `cd` through the symlink, so this is the sibling of what .praxis points at
-  # rather than of the link itself.
+elif sibling="$(cd "$DIR/../../../../praxis-policy" 2>/dev/null && pwd)"; then
   ln -sfn "$sibling" "$PPE_LINK"
-  echo "gateway: .policy -> $sibling (sibling of .praxis)" >&2
+  echo "gateway: .policy -> $sibling (sibling checkout)" >&2
 else
   url="${PPE_GIT_URL:-https://github.com/praxis-proxy/policy.git}"
   ref="${PPE_GIT_REF:-$DEFAULT_PPE_REF}"
@@ -115,12 +46,78 @@ else
   echo "gateway: .policy at $(git -C "$PPE_LINK" rev-parse --short HEAD)" >&2
 fi
 
-# 2. Build.
+# Check for duplicate crates and unused patches before building.
+count_pkg() { grep -c "^name = \"$1\"\$" "$DIR/Cargo.lock" 2>/dev/null || true; }
+
+check_graph() {
+  local lock="$DIR/Cargo.lock" problems=0
+  [ -f "$lock" ] || return 0
+
+  # Cargo drops a `[patch]` it cannot apply and resolves the registry copy
+  # instead, silently. The lock records the ones it skipped.
+  if grep -q '^\[\[patch.unused\]\]' "$lock"; then
+    echo "gateway:   unused [patch] entries:" >&2
+    grep -A2 '^\[\[patch.unused\]\]' "$lock" | grep '^name' | sed 's/^/gateway:     /' >&2
+    problems=1
+  fi
+
+  # Two copies of a crate that defines a trait mean two incompatible traits.
+  # praxis-policy-core is the one that breaks host plugin registration.
+  local n
+  for pkg in praxis-policy-core praxis-proxy-core quixotic-plecostomus-core; do
+    n="$(count_pkg "$pkg")"
+    if [ "${n:-0}" -gt 1 ]; then
+      echo "gateway:   $n copies of $pkg in the graph:" >&2
+      grep -A1 "^name = \"$pkg\"\$" "$lock" | grep '^version' | sed 's/^/gateway:     /' >&2
+      problems=1
+    fi
+  done
+  return $problems
+}
+
+explain_graph() {
+  cat >&2 <<'MSG'
+gateway:
+gateway: What this usually means:
+gateway:   praxis-policy-core x2      .policy is not on the tag matching the
+gateway:                              praxis-policy release praxis depends on.
+gateway:                              Check DEFAULT_PPE_REF against the `ppe`
+gateway:                              version in the praxis release.
+gateway:   quixotic-plecostomus-core x2
+gateway:                              the praxis-ai rev and the praxis release
+gateway:                              disagree on the pingora fork. Bump the
+gateway:                              praxis-ai rev in gateway/Cargo.toml.
+gateway:   praxis-proxy-core x2       praxis-ai pins praxis by git; the
+gateway:                              [patch] redirecting it to the published
+gateway:                              version is missing or did not apply.
+MSG
+}
+
+# Regenerate a stale lockfile once before reporting a version conflict.
+if ! check_graph; then
+  echo "gateway: dependency graph is incoherent, regenerating Cargo.lock" >&2
+  ( cd "$DIR" && cargo generate-lockfile >&2 )
+  if ! check_graph; then
+    echo "gateway: still incoherent after regenerating the lock." >&2
+    explain_graph
+    exit 1
+  fi
+  echo "gateway: graph coherent after regenerating" >&2
+fi
+
+# 3. Build.
 PROFILE="${GATEWAY_PROFILE:-release}"
 flag=""
 [ "$PROFILE" = "release" ] && flag="--release"
 echo "gateway: cargo build ($PROFILE)" >&2
 ( cd "$DIR" && cargo build $flag >&2 )
+
+# Check again in case Cargo changed the dependency graph during the build.
+if ! check_graph; then
+  echo "gateway: the build re-resolved into an incoherent graph." >&2
+  explain_graph
+  exit 1
+fi
 
 bin="$DIR/target/$PROFILE/policy-engine-gateway"
 [ -x "$bin" ] || { echo "gateway binary not found at $bin" >&2; exit 1; }
